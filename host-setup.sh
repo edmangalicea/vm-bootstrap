@@ -19,6 +19,64 @@ warn() { printf '[%s]  \033[1;33mWARN\033[0m  %s\n' "$(_ts)" "$*" | tee -a "$LOG
 fail() { printf '[%s]  \033[1;31mFAIL\033[0m  %s\n' "$(_ts)" "$*" | tee -a "$LOG"; }
 die()  { fail "$*"; exit 1; }
 
+# ── Spinner ──────────────────────────────────────────────────────────────────
+
+_SPIN_PID=""
+
+_spin_cleanup() {
+  if [[ -n "$_SPIN_PID" ]] && kill -0 "$_SPIN_PID" 2>/dev/null; then
+    kill "$_SPIN_PID" 2>/dev/null
+    wait "$_SPIN_PID" 2>/dev/null
+  fi
+  printf '\033[?25h' >&2  # restore cursor
+}
+trap _spin_cleanup EXIT INT TERM
+
+spin_start() {
+  local msg="$1"
+  printf '\033[?25l' >&2  # hide cursor
+  (
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local start=$SECONDS
+    local i=0
+    while true; do
+      local elapsed=$(( SECONDS - start ))
+      local mins=$(( elapsed / 60 ))
+      local secs=$(( elapsed % 60 ))
+      printf '\r\033[K  %s \033[36m%s\033[0m  \033[2m%dm %02ds\033[0m' \
+        "${frames[i % ${#frames[@]}]}" "$msg" "$mins" "$secs" >&2
+      i=$(( i + 1 ))
+      sleep 0.1
+    done
+  ) &
+  _SPIN_PID=$!
+}
+
+spin_stop() {
+  local exit_code="$1"
+  local msg="$2"
+  if [[ -n "$_SPIN_PID" ]] && kill -0 "$_SPIN_PID" 2>/dev/null; then
+    kill "$_SPIN_PID" 2>/dev/null
+    wait "$_SPIN_PID" 2>/dev/null
+  fi
+  _SPIN_PID=""
+  if [[ "$exit_code" -eq 0 ]]; then
+    printf '\r\033[K  \033[32m✔\033[0m %s\n' "$msg" >&2
+  else
+    printf '\r\033[K  \033[31m✘\033[0m %s\n' "$msg" >&2
+  fi
+  printf '\033[?25h' >&2  # restore cursor
+}
+
+run_with_spin() {
+  local msg="$1"; shift
+  spin_start "$msg"
+  local rc=0
+  "$@" >> "$LOG" 2>&1 || rc=$?
+  spin_stop "$rc" "$msg"
+  return "$rc"
+}
+
 log "vm-bootstrap started"
 log "macOS version: $(sw_vers -productVersion) ($(uname -m))"
 
@@ -38,6 +96,7 @@ log "Network OK"
 
 if ! xcode-select -p &>/dev/null; then
   log "Installing Xcode Command Line Tools..."
+  spin_start "Installing Xcode Command Line Tools"
 
   # Try non-interactive install via softwareupdate first
   touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
@@ -45,7 +104,7 @@ if ! xcode-select -p &>/dev/null; then
 
   if [[ -n "$CLT_LABEL" ]]; then
     log "Installing via softwareupdate: $CLT_LABEL"
-    softwareupdate -i "$CLT_LABEL" --verbose 2>&1 | tee -a "$LOG"
+    softwareupdate -i "$CLT_LABEL" --verbose >> "$LOG" 2>&1
   else
     log "softwareupdate label not found, falling back to xcode-select --install"
     xcode-select --install 2>/dev/null
@@ -58,6 +117,8 @@ if ! xcode-select -p &>/dev/null; then
   until xcode-select -p &>/dev/null; do
     sleep 5
   done
+
+  spin_stop 0 "Xcode Command Line Tools installed"
   log "Xcode Command Line Tools installed"
 else
   log "Xcode Command Line Tools already installed"
@@ -67,7 +128,11 @@ fi
 
 if ! command -v brew &>/dev/null && [[ ! -x /opt/homebrew/bin/brew ]] && [[ ! -x /usr/local/bin/brew ]]; then
   log "Installing Homebrew..."
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" 2>&1 | tee -a "$LOG"
+  spin_start "Installing Homebrew"
+  _brew_rc=0
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" >> "$LOG" 2>&1 || _brew_rc=$?
+  spin_stop "$_brew_rc" "Homebrew installed"
+  [[ "$_brew_rc" -ne 0 ]] && die "Homebrew installation failed"
   log "Homebrew installed"
 else
   log "Homebrew already installed"
@@ -88,7 +153,7 @@ fi
 
 if ! command -v sshpass &>/dev/null; then
   log "Installing sshpass..."
-  brew install sshpass 2>&1 | tee -a "$LOG"
+  run_with_spin "Installing sshpass" brew install sshpass
   log "sshpass installed"
 else
   log "sshpass already installed"
@@ -101,7 +166,11 @@ export PATH="$HOME/.local/bin:$PATH"
 
 if ! command -v lume &>/dev/null && [[ ! -x "$HOME/.local/bin/lume" ]]; then
   log "Installing Lume..."
-  curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/lume/scripts/install.sh | bash 2>&1 | tee -a "$LOG"
+  spin_start "Installing Lume"
+  _lume_rc=0
+  curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/lume/scripts/install.sh | bash >> "$LOG" 2>&1 || _lume_rc=$?
+  spin_stop "$_lume_rc" "Lume installed"
+  [[ "$_lume_rc" -ne 0 ]] && die "Lume installation failed"
   log "Lume installed"
 else
   log "Lume already installed"
@@ -119,8 +188,12 @@ log "Lume path: $LUME_PATH"
 
 if ! command -v claude &>/dev/null && [[ ! -x "$HOME/.local/bin/claude" ]]; then
   log "Installing Claude Code..."
-  curl -fsSL https://claude.ai/install.sh | bash 2>&1 | tee -a "$LOG"
+  spin_start "Installing Claude Code"
+  _claude_rc=0
+  curl -fsSL https://claude.ai/install.sh | bash >> "$LOG" 2>&1 || _claude_rc=$?
   export PATH="$HOME/.claude/bin:$HOME/.local/bin:$PATH"
+  spin_stop "$_claude_rc" "Claude Code installed"
+  [[ "$_claude_rc" -ne 0 ]] && die "Claude Code installation failed"
   log "Claude Code installed"
 else
   log "Claude Code already installed"
@@ -191,6 +264,13 @@ log "vm-bootstrap skill installed to ~/.claude/commands/vm-bootstrap.md"
 # ── Launch Claude Code ───────────────────────────────────────────────────────
 
 log "Launching Claude Code..."
+
+printf '\n' >&2
+printf '  \033[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n' >&2
+printf '    \033[32m✔\033[0m Host setup complete. Launching Claude Code...\n' >&2
+printf '    Claude will now create a VM and install dotfiles.\n' >&2
+printf '  \033[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n' >&2
+printf '\n' >&2
 
 # Check if Claude Code is authenticated by testing a trivial non-interactive command.
 # If not authenticated, launch interactively so the user can complete browser-based login.
