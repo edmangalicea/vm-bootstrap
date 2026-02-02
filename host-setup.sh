@@ -65,7 +65,7 @@ fi
 
 # ── Homebrew ─────────────────────────────────────────────────────────────────
 
-if ! command -v brew &>/dev/null; then
+if ! command -v brew &>/dev/null && [[ ! -x /opt/homebrew/bin/brew ]] && [[ ! -x /usr/local/bin/brew ]]; then
   log "Installing Homebrew..."
   NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" 2>&1 | tee -a "$LOG"
   log "Homebrew installed"
@@ -75,6 +75,14 @@ fi
 
 # Ensure brew is on PATH for the rest of the script
 eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+
+# Persist Homebrew PATH to shell profile (idempotent)
+BREW_SHELLENV_LINE='eval "$(/opt/homebrew/bin/brew shellenv zsh)"'
+if ! grep -qF "$BREW_SHELLENV_LINE" "$HOME/.zprofile" 2>/dev/null; then
+  log "Adding Homebrew to ~/.zprofile..."
+  echo >> "$HOME/.zprofile"
+  echo "$BREW_SHELLENV_LINE" >> "$HOME/.zprofile"
+fi
 
 # ── sshpass ──────────────────────────────────────────────────────────────────
 
@@ -88,16 +96,16 @@ fi
 
 # ── Lume ─────────────────────────────────────────────────────────────────────
 
-if ! command -v lume &>/dev/null; then
+# Ensure ~/.local/bin is on PATH for the rest of the script
+export PATH="$HOME/.local/bin:$PATH"
+
+if ! command -v lume &>/dev/null && [[ ! -x "$HOME/.local/bin/lume" ]]; then
   log "Installing Lume..."
   curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/lume/scripts/install.sh | bash 2>&1 | tee -a "$LOG"
   log "Lume installed"
 else
   log "Lume already installed"
 fi
-
-# Ensure lume is on PATH
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
 
 # Verify lume is available
 if ! command -v lume &>/dev/null; then
@@ -109,7 +117,7 @@ log "Lume path: $LUME_PATH"
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
-if ! command -v claude &>/dev/null; then
+if ! command -v claude &>/dev/null && [[ ! -x "$HOME/.local/bin/claude" ]]; then
   log "Installing Claude Code..."
   curl -fsSL https://claude.ai/install.sh | bash 2>&1 | tee -a "$LOG"
   export PATH="$HOME/.claude/bin:$HOME/.local/bin:$PATH"
@@ -123,6 +131,14 @@ if ! command -v claude &>/dev/null; then
 fi
 
 log "Claude Code version: $(claude --version 2>/dev/null || echo 'unknown')"
+
+# Persist ~/.local/bin to PATH in shell profile (idempotent)
+LOCAL_BIN_LINE='export PATH="$HOME/.local/bin:$PATH"'
+if ! grep -qF "$LOCAL_BIN_LINE" "$HOME/.zshrc" 2>/dev/null; then
+  log "Adding ~/.local/bin to ~/.zshrc..."
+  echo >> "$HOME/.zshrc"
+  echo "$LOCAL_BIN_LINE" >> "$HOME/.zshrc"
+fi
 
 # ── Shared directory ─────────────────────────────────────────────────────────
 
@@ -175,7 +191,14 @@ log "vm-bootstrap skill installed to ~/.claude/commands/vm-bootstrap.md"
 # ── Launch Claude Code ───────────────────────────────────────────────────────
 
 log "Launching Claude Code..."
-log "You will be prompted to authenticate via browser."
-log "After authentication, Claude Code will automatically create the VM and install dotfiles."
 
-exec claude --dangerously-skip-permissions -p "Run /vm-bootstrap"
+# Check if Claude Code is authenticated by testing a trivial non-interactive command.
+# If not authenticated, launch interactively so the user can complete browser-based login.
+if claude --dangerously-skip-permissions -p "echo hello" &>/dev/null; then
+  log "Claude Code is authenticated. Running vm-bootstrap..."
+  exec claude --dangerously-skip-permissions -p "Run /vm-bootstrap"
+else
+  log "Claude Code is not yet authenticated."
+  log "Please complete browser-based login, then run /vm-bootstrap inside Claude Code."
+  exec claude --dangerously-skip-permissions
+fi
